@@ -1,0 +1,105 @@
+# Créé par BONFILS CORPORATION™
+
+import streamlit as st
+import numpy as np
+import pandas as pd
+from sklearn.pipeline import Pipeline
+from sklearn.linear_model import LogisticRegression
+from sklearn.calibration import CalibratedClassifierCV, calibration_curve
+from sklearn.model_selection import StratifiedKFold, GridSearchCV
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import brier_score_loss, log_loss, accuracy_score
+import matplotlib.pyplot as plt
+import io
+
+st.set_page_config(
+    page_title="Fusion ML Bonfils™",
+    page_icon="🤖",
+    layout="centered"
+)
+
+st.title("🤖 Prédictive - P_poisson + P_bookie")
+st.markdown("Créé par **BONFILS CORPORATION™** -- Pipeline ML avec calibration et téléchargement de résultats.")
+
+# --- Génération des données exemples ---
+@st.cache_data
+def generate_data(n=1000, seed=42):
+    np.random.seed(seed)
+    P_poisson = np.random.beta(2, 2, size=n)
+    noise = np.random.normal(0, 0.1, size=n)
+    P_bookie = np.clip(P_poisson + noise, 0.01, 0.99)
+    prob_true = (P_poisson + P_bookie) / 2
+    y = np.random.binomial(1, prob_true)
+    X = np.column_stack([P_poisson, P_bookie])
+    return X, y
+
+X, y = generate_data()
+
+# --- Pipeline ML ---
+@st.cache_resource
+def train_pipeline(X, y):
+    scaler = StandardScaler()
+    base_model = LogisticRegression(penalty="l2", solver="liblinear", class_weight="balanced", max_iter=1000)
+    calibrated = CalibratedClassifierCV(base_estimator=base_model, method="sigmoid", cv=3)
+    pipeline = Pipeline([("scaler", scaler), ("classifier", calibrated)])
+
+    param_grid = {
+        "classifier__base_estimator__C": [0.01, 0.1, 1, 10]
+    }
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    grid = GridSearchCV(pipeline, param_grid, scoring="neg_brier_score", cv=cv, n_jobs=-1)
+    grid.fit(X, y)
+
+    return grid.best_estimator_
+
+model = train_pipeline(X, y)
+
+# --- Interface utilisateur pour prédiction ---
+st.subheader("📥 Tester tes propres probabilités")
+n_rows = st.number_input("Combien de lignes veux-tu tester ?", min_value=1, max_value=10, value=3)
+
+user_input = []
+for i in range(n_rows):
+    col1, col2 = st.columns(2)
+    with col1:
+        p1 = st.slider(f"Ligne {i+1} - P_poisson", 0.0, 1.0, 0.5, 0.01)
+    with col2:
+        p2 = st.slider(f"Ligne {i+1} - P_bookie", 0.0, 1.0, 0.5, 0.01)
+    user_input.append([p1, p2])
+
+X_user = np.array(user_input)
+P_fusion = model.predict_proba(X_user)[:, 1]
+y_pred = model.predict(X_user)
+
+# --- Affichage des résultats ---
+df_results = pd.DataFrame({
+    "P_poisson": X_user[:, 0],
+    "P_bookie": X_user[:, 1],
+    "P_fusion": P_fusion,
+    "Classe prédite": y_pred
+})
+
+st.subheader("📊 Résultats des prédictions")
+st.dataframe(df_results.style.format({"P_poisson": "{:.3f}", "P_bookie": "{:.3f}", "P_fusion": "{:.3f}"}), use_container_width=True)
+
+# --- Bouton de téléchargement ---
+csv_data = df_results.to_csv(index=False).encode('utf-8')
+st.download_button(
+    label="📥 Télécharger les résultats (.csv)",
+    data=csv_data,
+    file_name="resultats_fusion_bonfils.csv",
+    mime="text/csv"
+)
+
+# --- Courbe de calibration ---
+st.subheader("📈 Courbe de calibration")
+y_proba = model.predict_proba(X)[:, 1]
+fraction_of_positives, mean_predicted_value = calibration_curve(y, y_proba, n_bins=10)
+
+fig, ax = plt.subplots()
+ax.plot(mean_predicted_value, fraction_of_positives, "s-", label="Modèle calibré")
+ax.plot([0, 1], [0, 1], "k--", label="Calibration parfaite")
+ax.set_xlabel("Probabilité prédite moyenne")
+ax.set_ylabel("Fraction de positifs")
+ax.legend()
+st.pyplot(fig)
